@@ -2,6 +2,32 @@
 
 Uma API RESTful para um e-commerce de cosméticos, construída com Node.js, Express e MySQL. Inclui autenticação JWT, catálogo de produtos, carrinho de compras, checkout via WhatsApp, rotas administrativas (CRUD de produtos), documentação com Swagger e testes de desempenho com k6.
 
+## 📋 Índice* **Gerenciamento de Carrinho:** Rotas privadas (`/cart`) onde usuários logados podem adicionar, remover e visualizar itens. O carrinho é persistido no banco de dados.
+
+* **Checkout via WhatsApp:** Rota privada (`/order/checkout`) que:
+
+- [🎯 Sobre o Projeto](#-sobre-o-projeto)    1.  Valida o carrinho do usuário.
+
+- [🏗️ Arquitetura](#️-arquitetura)    2.  Formata uma mensagem de pedido detalhada (itens, total, dados do cliente).
+
+- [🚀 Funcionalidades](#-funcionalidades)    3.  Limpa o carrinho do usuário no banco.
+
+- [⚙️ Instalação e Configuração](#️-instalação-e-configuração)    4.  Retorna uma URL `wa.me` para o frontend redirecionar o cliente.
+
+- [🗄️ Configuração do Banco de Dados](#️-configuração-do-banco-de-dados)
+
+- [🧪 Testes Automatizados](#-testes-automatizados)## 🚀 Tecnologias Utilizadas
+
+- [🐛 Bugs Identificados](#-bugs-identificados)
+
+- [📊 Relatórios de Teste](#-relatórios-de-teste)* **Backend:** Node.js
+
+- [📚 Documentação Adicional](#-documentação-adicional)* **Servidor:** Express
+
+- [🔗 Links Úteis](#-links-úteis)* **Banco de Dados:** MySQL (utilizando `mysql2` com `async/await`)
+
+* **Autenticação:** JSON Web Tokens (JWT) e `bcrypt`
+
 ## ✨ Funcionalidades
 
 - Autenticação e registro de usuários (JWT)
