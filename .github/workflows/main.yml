@@ -1,0 +1,302 @@
+# Nome da sua pipeline de CI
+name: CI API Cosméticos
+
+# Define os gatilhos (triggers)
+on:
+  # Roda em pushes para as branches 'main' e 'develop'        
+  push:
+    branches: [ "main", "develop" ]
+  # Roda em pull requests direcionados para 'main' e 'develop'
+  pull_request:
+    branches: [ "main", "develop" ]
+  # Permite rodar manualmente
+  workflow_dispatch:
+
+jobs:
+  # O nome do "job". Você pode ter vários, mas para CI geralmente temos um.
+  build-and-test:
+    # Executa apenas em push/pull_request (não roda no workflow_dispatch manual)
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    # A máquina virtual que será usada (Ubuntu é o padrão)
+    runs-on: ubuntu-latest
+
+    # --- A MÁGICA DO BANCO DE DADOS ---
+    # Define os "serviços" que rodam "ao lado" do seu job.
+    # Isso é o seu "mysql local" na nuvem.
+    services:
+      mysql:
+        # Imagem Docker do MySQL que queremos usar
+        image: mysql:8.0
+        # Variáveis de ambiente para o container do MySQL
+        env:
+          MYSQL_ROOT_PASSWORD: 'root' # Senha super simples, pois é só para testes
+          MYSQL_DATABASE: 'cosmeticos_db' # O NOME DO BANCO QUE SERÁ CRIADO
+        # Mapeia a porta 3306 do container para a 3306 da máquina (runner)
+        ports:
+          - 3306:3306
+        # Um "health check" para garantir que o job só continue
+        # quando o MySQL estiver 100% pronto para receber conexões.
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    # Passos (steps) que o job executará
+    steps:
+      # 1. Baixa o código do seu repositório para a máquina virtual
+      - name: 1. Checkout do Repositório
+        uses: actions/checkout@v4
+
+      # 2. Configura o ambiente Node.js
+      - name: 2. Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          # ATENÇÃO: Coloque aqui a versão do Node.js que você usa no projeto
+          node-version: '22.x' 
+          # Habilita o cache do 'npm' para acelerar futuras instalações
+          cache: 'npm'
+
+      # 3. Instala as dependências (usa 'npm ci' que é mais rápido e seguro para CI)
+      - name: 3. Instalar Dependências
+        run: npm ci
+
+      # 4. EXATAMENTE O QUE VOCÊ PEDIU: Criar tabelas e usuários
+      # Este passo roda suas migrations e seus seeders
+      - name: 4. Preparar Banco de Dados (Migrations + Seeders)
+        # ATENÇÃO: Você precisará criar este script no seu 'package.json'
+        run: npm run db:prepare-test
+        # Define as variáveis de ambiente que sua aplicação (Node/Express)
+        # usará para se conectar ao banco de dados deste 'job'.
+        env:
+          DB_HOST: '127.0.0.1' # O IP do runner (mapeado para o container)
+          DB_PORT: 3306 # A porta que mapeamos
+          DB_USER: 'root' # O usuário 'root' que definimos
+          DB_PASSWORD: 'root' # A senha 'root' que definimos
+          DB_NAME: 'cosmeticos_db' # O banco que definimos
+          SELLER_WHATSAPP: 5521997983639
+          # Adicione aqui QUALQUER outra variável de ambiente que seu app precise
+          # Ex: JWT_SECRET, API_KEY, etc.
+          # Lembre-se: NÃO COLOQUE segredos reais aqui. Use 'GitHub Secrets' para isso.
+          JWT_SECRET: 'test_jwt_secret_for_ci'
+          JWT_EXPIRES_IN: '1d'
+
+      # 4.5. Verificar conectividade do banco
+      - name: 4.5. Verificar Banco de Dados
+        run: |
+          echo "🔍 Verificando conectividade com o banco..."
+          mysql -h 127.0.0.1 -u root -proot -e "USE cosmeticos_db; SELECT COUNT(*) as users FROM users; SELECT COUNT(*) as products FROM products;"
+
+      # 5. Iniciar a aplicação em background
+      - name: 5. Iniciar API em Background
+        run: |
+          echo "🚀 Iniciando API..."
+          npm start > api.log 2>&1 &
+          API_PID=$!
+          echo "API iniciada com PID: $API_PID"
+          echo $API_PID > api.pid
+          sleep 5
+        env:
+          # Variáveis para a aplicação rodar
+          DB_HOST: '127.0.0.1'
+          DB_PORT: 3306
+          DB_USER: 'root'
+          DB_PASSWORD: 'root'
+          DB_NAME: 'cosmeticos_db'
+          JWT_SECRET: 'test_jwt_secret_for_ci'
+          JWT_EXPIRES_IN: '1d'
+          PORT: 3333
+          SELLER_WHATSAPP: 5521997983639
+
+      # 6. Aguardar API estar pronta e debug
+      - name: 6. Aguardar API Estar Pronta
+        run: |
+          echo "⏳ Aguardando API estar disponível..."
+          
+          # Verificar se o processo ainda está rodando
+          if ! kill -0 $(cat api.pid) 2>/dev/null; then
+            echo "❌ API não está rodando! Verificando logs..."
+            cat api.log
+            exit 1
+          fi
+          
+          # Aguardar API responder
+          for i in {1..30}; do
+            if curl -f http://localhost:3333/ > /dev/null 2>&1; then
+              echo "✅ API está online!"
+              curl -s http://localhost:3333/ | head -5
+              break
+            fi
+            echo "⏳ Tentativa $i/30 - aguardando..."
+            sleep 2
+            
+            # Se falhar muitas vezes, mostrar logs
+            if [ $i -eq 15 ]; then
+              echo "📋 Logs da API (últimas 20 linhas):"
+              tail -20 api.log
+            fi
+          done
+          
+          # Verificação final
+          if ! curl -f http://localhost:3333/ > /dev/null 2>&1; then
+            echo "❌ API não respondeu após 60 segundos!"
+            echo "📋 Logs completos da API:"
+            cat api.log
+            exit 1
+          fi
+
+      # 6.5. Teste rápido de login
+      - name: 6.5. Teste de Login
+        run: |
+          echo "🔐 Testando login com usuário de teste..."
+          RESPONSE=$(curl -s -X POST http://localhost:3333/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"user@email.com","senha":"123456"}')
+          echo "Resposta do login: $RESPONSE"
+          
+          # Verificar se contém token
+          if echo "$RESPONSE" | grep -q "token"; then
+            echo "✅ Login funcionando corretamente!"
+          else
+            echo "❌ Login falhou! Verificando usuários no banco..."
+            mysql -h 127.0.0.1 -u root -proot -e "USE cosmeticos_db; SELECT email, LEFT(password_hash, 20) as hash_preview FROM users;"
+            exit 1
+          fi
+
+      # 7. Roda os testes (que agora encontrarão a API rodando)
+      - name: 7. Rodar Testes (Funcionais)
+        run: |
+          echo "🧪 Iniciando testes..."
+          echo "BASE_URL: $BASE_URL"
+          npm test
+        env:
+          # Os testes usarão BASE_URL para conectar na API
+          BASE_URL: 'http://localhost:3333'
+          # Outras variáveis que os testes podem precisar
+          JWT_SECRET: 'test_jwt_secret_for_ci'
+          JWT_EXPIRES_IN: '1d'
+
+      # 8. Debug em caso de falha
+      - name: 8. Debug - Logs da API (se testes falharem)
+        if: failure()
+        run: |
+          echo "📋 Logs da API:"
+          cat api.log || echo "Arquivo api.log não encontrado"
+          echo "📋 Verificando se API ainda está rodando:"
+          curl -v http://localhost:3333/ || echo "API não está respondendo"
+
+  # -------------------------------------------
+  # Job manual dedicado para executar testes k6
+  # -------------------------------------------
+  k6-tests:
+    name: k6 Manual Tests
+    # Este job roda SOMENTE quando disparado manualmente
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: 'root'
+          MYSQL_DATABASE: 'cosmeticos_db'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: 1. Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: 2. Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: 3. Instalar k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: 4. Instalar Dependências
+        run: npm ci
+
+      - name: 5. Preparar Banco de Dados (Migrations + Seeders)
+        run: npm run db:prepare-test
+        env:
+          DB_HOST: '127.0.0.1'
+          DB_PORT: 3306
+          DB_USER: 'root'
+          DB_PASSWORD: 'root'
+          DB_NAME: 'cosmeticos_db'
+          SELLER_WHATSAPP: 5521997983639
+          JWT_SECRET: 'test_jwt_secret_for_ci'
+          JWT_EXPIRES_IN: '1d'
+
+      - name: 5.5. Verificar Banco de Dados
+        run: |
+          echo "🔍 Verificando conectividade com o banco..."
+          mysql -h 127.0.0.1 -u root -proot -e "USE cosmeticos_db; SELECT COUNT(*) as users FROM users; SELECT COUNT(*) as products FROM products;"
+
+      - name: 6. Iniciar API em Background
+        run: |
+          echo "🚀 Iniciando API..."
+          npm start > api.log 2>&1 &
+          API_PID=$!
+          echo "API iniciada com PID: $API_PID"
+          echo $API_PID > api.pid
+          sleep 5
+        env:
+          DB_HOST: '127.0.0.1'
+          DB_PORT: 3306
+          DB_USER: 'root'
+          DB_PASSWORD: 'root'
+          DB_NAME: 'cosmeticos_db'
+          JWT_SECRET: 'test_jwt_secret_for_ci'
+          JWT_EXPIRES_IN: '1d'
+          PORT: 3333
+          SELLER_WHATSAPP: 5521997983639
+
+      - name: 7. Aguardar API Estar Pronta
+        run: |
+          echo "⏳ Aguardando API estar disponível..."
+          if ! kill -0 $(cat api.pid) 2>/dev/null; then
+            echo "❌ API não está rodando! Verificando logs..."
+            cat api.log
+            exit 1
+          fi
+          for i in {1..30}; do
+            if curl -f http://localhost:3333/ > /dev/null 2>&1; then
+              echo "✅ API está online!"
+              curl -s http://localhost:3333/ | head -5
+              break
+            fi
+            echo "⏳ Tentativa $i/30 - aguardando..."
+            sleep 2
+            if [ $i -eq 15 ]; then
+              echo "📋 Logs da API (últimas 20 linhas):"
+              tail -20 api.log
+            fi
+          done
+          if ! curl -f http://localhost:3333/ > /dev/null 2>&1; then
+            echo "❌ API não respondeu após 60 segundos!"
+            echo "📋 Logs completos da API:"
+            cat api.log
+            exit 1
+          fi
+
+      - name: 8. Executar k6 - Login
+        run: |
+          mkdir -p results
+          k6 run --summary-export results/k6-login-summary.json k6/login.test.js
+        env:
+          BASE_URL: 'http://localhost:3333'
+
+      - name: 9. Publicar Artefatos (k6 summary)
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-login-summary
+          path: results/*.json
